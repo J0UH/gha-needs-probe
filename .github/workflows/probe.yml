@@ -1,0 +1,316 @@
+# Copies the job graph and `if:` expressions of aryze-io/money-os ci.yml (PR #471, MON-660):
+# changes -> plan -> build / reuse -> release list -> deploy -> ship check, beside the check jobs
+# deploy needs. Every step only echoes. `deploy-old` / `ship-check-old` carry the condition #471
+# shipped with (`github.ref == 'refs/heads/dev'`, implicit success()); `deploy` / `ship-check`
+# carry the fix.
+name: needs probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: Which images the plan builds
+        type: choice
+        options: [all-reuse, all-build, mixed]
+        default: mixed
+      fail:
+        description: What fails
+        type: choice
+        options: [none, build-scan, reuse-scan, check]
+        default: none
+
+permissions:
+  contents: read
+
+jobs:
+  release-checks:
+    name: release checks
+    if: always()
+    needs: [format, hooks, typescript, dotnet, terraform, trivy, security]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all applicable checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          checks = json.loads(os.environ['RESULTS'])
+          failed = [name for name, value in checks.items() if value['result'] not in ('success', 'skipped')]
+          if checks['security']['result'] != 'success' or checks['format']['result'] != 'success':
+              failed.append('mandatory checks did not run')
+          if failed:
+              raise SystemExit('Release checks failed: ' + ', '.join(failed))
+          PYCODE
+
+  format:
+    name: prettier
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo prettier
+
+  security:
+    name: security checks
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo security
+
+  pr-scope:
+    name: pr scope
+    runs-on: ubuntu-latest
+    outputs:
+      dotnet: ${{ steps.filter.outputs.dotnet }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+      hooks: ${{ steps.filter.outputs.hooks }}
+      code: ${{ steps.filter.outputs.code }}
+      dotnet_matrix: ${{ steps.filter.outputs.dotnet_matrix }}
+    steps:
+      - id: filter
+        run: |
+          for flag in dotnet typescript terraform hooks code; do echo "${flag}=true" >> "$GITHUB_OUTPUT"; done
+          echo 'dotnet_matrix={"include":[{"group":"a"},{"group":"b"}]}' >> "$GITHUB_OUTPUT"
+
+  hooks:
+    name: agent hooks
+    runs-on: ubuntu-latest
+    needs: [pr-scope]
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request'
+      || needs.pr-scope.result != 'success'
+      || needs.pr-scope.outputs.hooks == 'true') }}
+    steps:
+      - run: echo hooks
+
+  typescript:
+    name: typescript
+    runs-on: ubuntu-latest
+    needs: [pr-scope]
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request'
+      || needs.pr-scope.result != 'success'
+      || needs.pr-scope.outputs.typescript == 'true') }}
+    steps:
+      - run: echo typescript
+
+  dotnet:
+    name: dotnet (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    needs: [pr-scope]
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request'
+      || needs.pr-scope.result != 'success'
+      || needs.pr-scope.outputs.dotnet == 'true') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pr-scope.outputs.dotnet_matrix) }}
+    steps:
+      - run: echo dotnet ${{ matrix.group }}
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    needs: [pr-scope]
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request'
+      || needs.pr-scope.result != 'success'
+      || needs.pr-scope.outputs.terraform == 'true') }}
+    steps:
+      - run: echo terraform
+
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    needs: [pr-scope]
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request'
+      || needs.pr-scope.result != 'success'
+      || needs.pr-scope.outputs.code == 'true') }}
+    steps:
+      - name: Scan the source tree
+        env:
+          FAIL: ${{ inputs.fail }}
+        run: |
+          echo trivy
+          if [ "$FAIL" = check ]; then echo "::error::the trivy check failed (probe input)"; exit 1; fi
+
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - id: filter
+        run: echo "code=true" >> "$GITHUB_OUTPUT"
+
+  plan:
+    name: image plan
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.changes.outputs.code == 'true'
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      build: ${{ steps.plan.outputs.build }}
+      scan: ${{ steps.plan.outputs.scan }}
+    steps:
+      - name: Plan the images
+        id: plan
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          case "$PLAN" in
+            all-reuse) matrix='{"include":[]}'; build=false; scan=true ;;
+            all-build) matrix='{"include":[{"service":"api"},{"service":"files"},{"service":"fx"}]}'; build=true; scan=false ;;
+            mixed)     matrix='{"include":[{"service":"api"}]}'; build=true; scan=true ;;
+          esac
+          printf 'matrix=%s\nbuild=%s\nscan=%s\n' "$matrix" "$build" "$scan" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [plan]
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Build, scan and push
+        env:
+          FAIL: ${{ inputs.fail }}
+        run: |
+          echo "build ${{ matrix.service }}"
+          if [ "$FAIL" = build-scan ]; then echo "::error::${{ matrix.service }} failed its scan (probe input)"; exit 1; fi
+
+  reuse:
+    name: scan reused images
+    runs-on: ubuntu-latest
+    needs: [plan]
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.plan.outputs.scan == 'true'
+    steps:
+      - name: Scan the reused images
+        env:
+          FAIL: ${{ inputs.fail }}
+        run: |
+          echo "scan reused images"
+          if [ "$FAIL" = reuse-scan ]; then echo "::error::a reused image failed its scan (probe input)"; exit 1; fi
+
+  release-list:
+    name: release list
+    runs-on: ubuntu-latest
+    needs: [plan, build, reuse]
+    if: >-
+      !cancelled()
+      && github.event_name != 'pull_request'
+      && needs.plan.result != 'skipped'
+    steps:
+      # ci-image-plan.py's require_results: each job passed, or was skipped because the plan gave
+      # it no work.
+      - name: Check every image and write the release list
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          BUILDS: ${{ needs.plan.outputs.build }}
+          SCANS: ${{ needs.plan.outputs.scan }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          REUSE_RESULT: ${{ needs.reuse.result }}
+        run: |
+          set -euo pipefail
+          echo "plan=${PLAN_RESULT} build=${BUILD_RESULT} (planned ${BUILDS}) reuse=${REUSE_RESULT} (planned ${SCANS})"
+          [ "$PLAN_RESULT" = success ] || { echo "::error::plan is ${PLAN_RESULT}"; exit 1; }
+          want() { [ "$1" = true ] && echo success || echo skipped; }
+          [ "$BUILD_RESULT" = "$(want "$BUILDS")" ] || { echo "::error::build is ${BUILD_RESULT}"; exit 1; }
+          [ "$REUSE_RESULT" = "$(want "$SCANS")" ] || { echo "::error::reuse is ${REUSE_RESULT}"; exit 1; }
+          echo "release list ok"
+
+  # #471 as shipped: no status function, so the implicit success() also reads the skipped
+  # build or reuse further up the chain.
+  deploy-old:
+    if: github.ref == 'refs/heads/dev'
+    name: deploy (old condition)
+    runs-on: ubuntu-latest
+    needs: [release-list, format, typescript, dotnet, terraform, trivy, security, release-checks]
+    steps:
+      - run: echo "deploy (old condition) ran"
+
+  deploy:
+    name: deploy (new condition)
+    runs-on: ubuntu-latest
+    needs: [release-list, format, typescript, dotnet, terraform, trivy, security, release-checks]
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/dev'
+      && needs.release-list.result == 'success'
+      && needs.format.result == 'success'
+      && needs.typescript.result == 'success'
+      && needs.dotnet.result == 'success'
+      && needs.terraform.result == 'success'
+      && needs.trivy.result == 'success'
+      && needs.security.result == 'success'
+      && needs.release-checks.result == 'success'
+    steps:
+      - run: echo "deploy (new condition) ran"
+
+  ship-check-old:
+    name: ship check (old condition)
+    runs-on: ubuntu-latest
+    needs: [changes, release-list, deploy-old, release-checks]
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    steps:
+      - name: A shippable push must actually have shipped
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RELEASE: ${{ needs.release-list.result }}
+          DEPLOY: ${{ needs.deploy-old.result }}
+          CHECKS: ${{ needs.release-checks.result }}
+        run: |
+          set -euo pipefail
+          echo "changes.code=${CODE}  release-list=${RELEASE}  deploy=${DEPLOY}  release-checks=${CHECKS}"
+          if [ "${CODE}" != "true" ]; then exit 0; fi
+          fail=0
+          if [ "${RELEASE}" = "skipped" ]; then
+            echo "::error title=Nothing shipped::release list was SKIPPED"
+            fail=1
+          fi
+          if [ "${RELEASE}" = "success" ] && [ "${DEPLOY}" = "skipped" ] && [ "${CHECKS}" = "success" ]; then
+            echo "::error title=Built but not deployed::every image is in ECR and deploy was SKIPPED"
+            fail=1
+          fi
+          exit "${fail}"
+
+  ship-check:
+    name: ship check (new condition)
+    runs-on: ubuntu-latest
+    needs: [changes, release-list, deploy, release-checks]
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    steps:
+      - name: A shippable push must actually have shipped
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RELEASE: ${{ needs.release-list.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          CHECKS: ${{ needs.release-checks.result }}
+        run: |
+          set -euo pipefail
+          echo "changes.code=${CODE}  release-list=${RELEASE}  deploy=${DEPLOY}  release-checks=${CHECKS}"
+          if [ "${CODE}" != "true" ]; then exit 0; fi
+          fail=0
+          if [ "${RELEASE}" = "skipped" ]; then
+            echo "::error title=Nothing shipped::release list was SKIPPED"
+            fail=1
+          fi
+          if [ "${RELEASE}" = "success" ] && [ "${DEPLOY}" = "skipped" ] && [ "${CHECKS}" = "success" ]; then
+            echo "::error title=Built but not deployed::every image is in ECR and deploy was SKIPPED"
+            fail=1
+          fi
+          exit "${fail}"
