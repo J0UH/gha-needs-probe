@@ -3,7 +3,7 @@
 # deploy needs. Every step only echoes. `deploy-old` / `ship-check-old` carry the condition #471
 # shipped with (`github.ref == 'refs/heads/dev'`, implicit success()); `deploy` / `ship-check`
 # carry the fix.
-name: needs probe
+name: needs-probe
 
 on:
   workflow_dispatch:
