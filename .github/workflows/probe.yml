@@ -1,5 +1,6 @@
-# Copies the job graph and `if:` expressions of aryze-io/money-os ci.yml (PR #471, MON-660):
-# changes -> plan -> build / reuse -> release list -> deploy -> ship check, beside the check jobs
+# Copies the job graph and `if:` expressions of aryze-io/money-os ci.yml (PRs #471 and #472 on
+# #473, MON-660): changes -> image-plan -> build / reuse -> release list -> deploy -> ship check,
+# beside the check jobs
 # deploy needs. Every step only echoes. `deploy-old` / `ship-check-old` carry the condition #471
 # shipped with (`github.ref == 'refs/heads/dev'`, implicit success()); `deploy` / `ship-check`
 # carry the fix.
@@ -149,7 +150,7 @@ jobs:
       - id: filter
         run: echo "code=true" >> "$GITHUB_OUTPUT"
 
-  plan:
+  image-plan:
     name: image plan
     runs-on: ubuntu-latest
     needs: [changes]
@@ -176,13 +177,13 @@ jobs:
   build:
     name: build ${{ matrix.service }}
     runs-on: ubuntu-latest
-    needs: [plan]
+    needs: [image-plan]
     if: >-
       github.event_name != 'pull_request'
-      && needs.plan.outputs.build == 'true'
+      && needs.image-plan.outputs.build == 'true'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.image-plan.outputs.matrix) }}
     steps:
       - name: Build, scan and push
         env:
@@ -194,10 +195,10 @@ jobs:
   reuse:
     name: scan reused images
     runs-on: ubuntu-latest
-    needs: [plan]
+    needs: [image-plan]
     if: >-
       github.event_name != 'pull_request'
-      && needs.plan.outputs.scan == 'true'
+      && needs.image-plan.outputs.scan == 'true'
     steps:
       - name: Scan the reused images
         env:
@@ -209,19 +210,19 @@ jobs:
   release-list:
     name: release list
     runs-on: ubuntu-latest
-    needs: [plan, build, reuse]
+    needs: [image-plan, build, reuse]
     if: >-
       !cancelled()
       && github.event_name != 'pull_request'
-      && needs.plan.result != 'skipped'
+      && needs.image-plan.result != 'skipped'
     steps:
       # ci-image-plan.py's require_results: each job passed, or was skipped because the plan gave
       # it no work.
       - name: Check every image and write the release list
         env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-          BUILDS: ${{ needs.plan.outputs.build }}
-          SCANS: ${{ needs.plan.outputs.scan }}
+          PLAN_RESULT: ${{ needs.image-plan.result }}
+          BUILDS: ${{ needs.image-plan.outputs.build }}
+          SCANS: ${{ needs.image-plan.outputs.scan }}
           BUILD_RESULT: ${{ needs.build.result }}
           REUSE_RESULT: ${{ needs.reuse.result }}
         run: |
